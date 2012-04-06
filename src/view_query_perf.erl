@@ -54,7 +54,8 @@ main(_ArgsList) ->
             {'DOWN', Ref, process, Pid, Reason} ->
                 io:format(standard_error,
                           "[ERROR] Worker ~p died with reason: ~p~n~n",
-                          [Pid, Reason])
+                          [Pid, Reason]),
+                Acc
             end
         end,
         [], WorkerPids),
