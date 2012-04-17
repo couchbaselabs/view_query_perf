@@ -8,7 +8,7 @@
 %    some configuration file (json, erlang terms).
 % 2) Ability to query N views/design documents.
 
--define(NUM_WORKERS, 100).
+-define(NUM_WORKERS, 50).
 -define(QUERIES_PER_WORKER, 100).
 
 -define(HOST, "localhost").
@@ -32,19 +32,40 @@
 }).
 
 
-main(_ArgsList) ->
+usage() ->
+    io:format("Usage:~n~n", []),
+    io:format("    ~s [options]~n~n", [escript:script_name()]),
+    io:format("Available options are:~n~n", []),
+    io:format("    --host    Host  Host to connect to, defaults to ~s.~n",
+              [?HOST]),
+    io:format("    --port    Port  Port to connect to, defaults to ~p.~n",
+              [?PORT]),
+    io:format("    --queries N     Number of consecutive queries each worker process does. Defaults to ~p.~n",
+              [?QUERIES_PER_WORKER]),
+    io:format("    --workers N     Number of worker processes to use. Defaults to ~p.~n",
+              [?NUM_WORKERS]),
+    io:format("~n", []),
+    halt(1).
+
+
+main(ArgsList) ->
     ok = inets:start(),
-    Url = query_url(?HOST, ?PORT, ?BUCKET_NAME, ?DDOC_ID, ?VIEW_NAME, ?QUERY_PARAMS),
+    Options = parse_options(ArgsList),
+    Host = proplists:get_value(host, Options, ?HOST),
+    Port = proplists:get_value(port, Options, ?PORT),
+    NumWorkers = proplists:get_value(workers, Options, ?NUM_WORKERS),
+    QueriesPerWorker = proplists:get_value(queries, Options, ?QUERIES_PER_WORKER),
+    Url = query_url(Host, Port, ?BUCKET_NAME, ?DDOC_ID, ?VIEW_NAME, ?QUERY_PARAMS),
     io:format("Spawning ~p workers, each will perform ~p view queries~n",
-              [?NUM_WORKERS, ?QUERIES_PER_WORKER]),
+              [NumWorkers, QueriesPerWorker]),
     io:format("View query URL is:  ~s~n", [Url]),
     WorkerPids = lists:map(
         fun(_) ->
             spawn_monitor(fun() ->
-                worker_loop(Url, #stats{}, ?QUERIES_PER_WORKER)
+                worker_loop(Url, #stats{}, QueriesPerWorker)
             end)
         end,
-        lists:seq(1, ?NUM_WORKERS)),
+        lists:seq(1, NumWorkers)),
     io:format("~nWaiting for workers to finish...~n~n", []),
     StatsList = lists:foldl(
         fun({Pid, Ref}, Acc) ->
@@ -88,7 +109,8 @@ worker_loop(ViewUrl, Stats, NumQueries) when NumQueries > 0 ->
     {ok, {{_, 200, _}, _Headers, _Body}} ->
         % TODO: JSON decode the body and checks if it has an "errors" field
         Stats2;
-    _Error ->
+    Error ->
+        io:format(standard_error, "View query response error: ~p~n", [Error]),
         Stats2#stats{
             errors = Stats2#stats.errors + 1
         }
@@ -159,3 +181,41 @@ to_list(List) when is_list(List) ->
     List;
 to_list(Int) when is_integer(Int) ->
     integer_to_list(Int).
+
+
+parse_options(ArgsList) ->
+    parse_options(ArgsList, []).
+
+parse_options([], Acc) ->
+    Acc;
+parse_options(["-h" | _Rest], _Acc) ->
+    usage();
+parse_options(["--help" | _Rest], _Acc) ->
+    usage();
+parse_options(["--host" | Rest], Acc) ->
+    case Rest of
+    [] ->
+        io:format(standard_error, "Missing argument for option --host~n", []),
+        halt(1);
+    [Host | Rest2] ->
+        parse_options(Rest2, [{host, Host} | Acc])
+    end;
+parse_options(["--port" = Opt | Rest], Acc) ->
+    {Port, Rest2} = parse_int_param(Opt, Rest),
+    parse_options(Rest2, [{port, Port} | Acc]);
+parse_options(["--workers" = Opt | Rest], Acc) ->
+    {Workers, Rest2} = parse_int_param(Opt, Rest),
+    parse_options(Rest2, [{workers, Workers} | Acc]);
+parse_options(["--queries" = Opt | Rest], Acc) ->
+    {Queries, Rest2} = parse_int_param(Opt, Rest),
+    parse_options(Rest2, [{queries, Queries} | Acc]);
+parse_options([Opt | _Rest], _Acc) ->
+    io:format(standard_error, "Unrecognized argument/option: ~s~n", [Opt]),
+    halt(1).
+
+
+parse_int_param(Opt, []) ->
+    io:format(standard_error, "Error: integer value missing for the option ~s.~n", [Opt]),
+    halt(1);
+parse_int_param(_Opt, [Int | RestArgs]) ->
+    {list_to_integer(Int), RestArgs}.
