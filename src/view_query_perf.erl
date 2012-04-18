@@ -36,14 +36,25 @@ usage() ->
     io:format("Usage:~n~n", []),
     io:format("    ~s [options]~n~n", [escript:script_name()]),
     io:format("Available options are:~n~n", []),
-    io:format("    --host    Host  Host to connect to, defaults to ~s.~n",
+    io:format("    --host Host              "
+              "Host to connect to, defaults to ~s.~n",
               [?HOST]),
-    io:format("    --port    Port  Port to connect to, defaults to ~p.~n",
+    io:format("    --port Port              "
+              "Port to connect to, defaults to ~p.~n",
               [?PORT]),
-    io:format("    --queries N     Number of consecutive queries each worker process does. Defaults to ~p.~n",
+    io:format("    --queries N              "
+              "Number of consecutive queries each worker process does. Defaults to ~p.~n",
               [?QUERIES_PER_WORKER]),
-    io:format("    --workers N     Number of worker processes to use. Defaults to ~p.~n",
+    io:format("    --workers N              "
+              "Number of worker processes to use. Defaults to ~p.~n",
               [?NUM_WORKERS]),
+    io:format("    --output-times FileName  "
+              "Output response times to a file.~n"
+              "                             "
+              "Useful to use with the ministat program (FreeBSD, Minix3).~n"
+              "                             "
+              "Mac OS X version of ministat at: git://github.com/codahale/ministat.git~n",
+              []),
     io:format("~n", []),
     halt(1).
 
@@ -88,6 +99,20 @@ main(ArgsList) ->
     io:format("    Lowest response time:    ~pms~n", [FinalStats#final_stats.min_resp_time]),
     io:format("    Response time std dev:   ~pms~n", [FinalStats#final_stats.std_dev_resp_time]),
     io:format("    # of errors:             ~p~n", [FinalStats#final_stats.errors]),
+    io:format("~n", []),
+    case proplists:get_value(times_file, Options) of
+    undefined ->
+        ok;
+    FileName ->
+        io:format("Saving query response times to file ~s~n", [FileName]),
+        case output_times(StatsList, FileName) of
+        ok ->
+            ok;
+        {error, Reason} ->
+            io:format(standard_error, "Error writing to file ~s: ~s~n",
+                      [FileName, file:format_error(Reason)])
+        end
+    end,
     io:format("~nBye!~n", []),
     ok.
 
@@ -156,6 +181,24 @@ compute_stats(StatsList) ->
     }.
 
 
+output_times(StatsList, FileName) ->
+    case file:open(FileName, [write, raw, binary]) of
+    {ok, Fd} ->
+        lists:foreach(
+            fun(#stats{resp_times = Times}) ->
+                lists:foreach(
+                    fun(T) ->
+                        ok = file:write(Fd, io_lib:format("~p~n", [T]))
+                    end,
+                    Times)
+            end,
+            StatsList),
+        ok = file:close(Fd);
+    Error ->
+        Error
+    end.
+
+
 query_url(Host, Port, BucketName, DDocId, ViewName, QueryParams) ->
     Base = "http://" ++ Host ++ ":" ++ integer_to_list(Port) ++ "/" ++
         BucketName ++ "/" ++ DDocId ++ "/_view/" ++ ViewName,
@@ -209,6 +252,14 @@ parse_options(["--workers" = Opt | Rest], Acc) ->
 parse_options(["--queries" = Opt | Rest], Acc) ->
     {Queries, Rest2} = parse_int_param(Opt, Rest),
     parse_options(Rest2, [{queries, Queries} | Acc]);
+parse_options(["--output-times" | Rest], Acc) ->
+    case Rest of
+    [] ->
+        io:format(standard_error, "Missing argument for option --output-times~n", []),
+        halt(1);
+    [FileName | Rest2] ->
+        parse_options(Rest2, [{times_file, FileName} | Acc])
+    end;
 parse_options([Opt | _Rest], _Acc) ->
     io:format(standard_error, "Unrecognized argument/option: ~s~n", [Opt]),
     halt(1).
