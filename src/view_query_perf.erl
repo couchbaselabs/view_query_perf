@@ -10,13 +10,8 @@
 
 -define(NUM_WORKERS, 50).
 -define(QUERIES_PER_WORKER, 100).
-
--define(HOST, "localhost").
--define(PORT, 9500).
--define(BUCKET_NAME, "default").
--define(DDOC_ID, "_design/test").
--define(VIEW_NAME, "view1").
--define(QUERY_PARAMS, [{limit, 10}, {stale, update_after}]).
+-define(QUERY_URL,
+        "http://localhost:9500/default/_design/test/_view/view1?limit=10&stale=update_after").
 
 -record(stats, {
     errors = 0,
@@ -36,12 +31,14 @@ usage() ->
     io:format("Usage:~n~n", []),
     io:format("    ~s [options]~n~n", [escript:script_name()]),
     io:format("Available options are:~n~n", []),
-    io:format("    --host Host              "
-              "Host to connect to, defaults to ~s.~n",
-              [?HOST]),
-    io:format("    --port Port              "
-              "Port to connect to, defaults to ~p.~n",
-              [?PORT]),
+    io:format("    --query-url Url          "
+              "URL to query, defaults to ~s.~n",
+              [?QUERY_URL]),
+    io:format("    --query-body String      "
+              "Body of the view query request (a POST request).~n"
+              "                             "
+              "Defaults to an empty string.~n",
+              []),
     io:format("    --queries N              "
               "Number of consecutive queries each worker process does. Defaults to ~p.~n",
               [?QUERIES_PER_WORKER]),
@@ -62,18 +59,17 @@ usage() ->
 main(ArgsList) ->
     ok = inets:start(),
     Options = parse_options(ArgsList),
-    Host = proplists:get_value(host, Options, ?HOST),
-    Port = proplists:get_value(port, Options, ?PORT),
     NumWorkers = proplists:get_value(workers, Options, ?NUM_WORKERS),
     QueriesPerWorker = proplists:get_value(queries, Options, ?QUERIES_PER_WORKER),
-    Url = query_url(Host, Port, ?BUCKET_NAME, ?DDOC_ID, ?VIEW_NAME, ?QUERY_PARAMS),
+    Url = proplists:get_value(query_url, Options, ?QUERY_URL),
+    Body = proplists:get_value(query_body, Options, []),
     io:format("Spawning ~p workers, each will perform ~p view queries~n",
               [NumWorkers, QueriesPerWorker]),
     io:format("View query URL is:  ~s~n", [Url]),
     WorkerPids = lists:map(
         fun(_) ->
             spawn_monitor(fun() ->
-                worker_loop(Url, #stats{}, QueriesPerWorker)
+                worker_loop(Url, Body, #stats{}, QueriesPerWorker)
             end)
         end,
         lists:seq(1, NumWorkers)),
@@ -117,14 +113,22 @@ main(ArgsList) ->
     ok.
 
 
-worker_loop(_ViewUrl, Stats, 0) ->
+worker_loop(_ViewUrl, _ViewBody, Stats, 0) ->
     exit({ok, Stats});
-worker_loop(ViewUrl, Stats, NumQueries) when NumQueries > 0 ->
+worker_loop(ViewUrl, ViewBody, Stats, NumQueries) when NumQueries > 0 ->
     T0 = os:timestamp(),
-    Resp = httpc:request(get,
-                         {ViewUrl, [{"Accept", "application/json"}]},
-                         [{connect_timeout, infinity}, {timeout, infinity}],
-                         [{sync, true}]),
+    Resp = case ViewBody of
+    [] ->
+        httpc:request(get,
+                      {ViewUrl, [{"Accept", "application/json"}]},
+                      [{connect_timeout, infinity}, {timeout, infinity}],
+                      [{sync, true}]);
+    _ ->
+        httpc:request(post,
+                      {ViewUrl, [{"Accept", "application/json"}], "application/json", ViewBody},
+                      [{connect_timeout, infinity}, {timeout, infinity}],
+                      [{sync, true}])
+    end,
     T1 = os:timestamp(),
     Time = timer:now_diff(T1, T0) / 1000,
     Stats2 = Stats#stats{
@@ -140,7 +144,7 @@ worker_loop(ViewUrl, Stats, NumQueries) when NumQueries > 0 ->
             errors = Stats2#stats.errors + 1
         }
     end,
-    worker_loop(ViewUrl, Stats3, NumQueries - 1).
+    worker_loop(ViewUrl, ViewBody, Stats3, NumQueries - 1).
 
 
 compute_stats(StatsList) ->
@@ -199,33 +203,6 @@ output_times(StatsList, FileName) ->
     end.
 
 
-query_url(Host, Port, BucketName, DDocId, ViewName, QueryParams) ->
-    Base = "http://" ++ Host ++ ":" ++ integer_to_list(Port) ++ "/" ++
-        BucketName ++ "/" ++ DDocId ++ "/_view/" ++ ViewName,
-    {Qs, _} = lists:foldl(
-        fun({K, V}, {Acc, Sep}) ->
-            {Acc ++ [Sep, to_list(K), $=, to_list(V)], "&"}
-        end,
-        {[], ""},
-        QueryParams),
-    case Qs of
-    [] ->
-        Base;
-    _ ->
-        Base ++ binary_to_list(iolist_to_binary([$?, Qs]))
-    end.
-
-
-to_list(Atom) when is_atom(Atom) ->
-    atom_to_list(Atom);
-to_list(Bin) when is_binary(Bin) ->
-    binary_to_list(Bin);
-to_list(List) when is_list(List) ->
-    List;
-to_list(Int) when is_integer(Int) ->
-    integer_to_list(Int).
-
-
 parse_options(ArgsList) ->
     parse_options(ArgsList, []).
 
@@ -235,17 +212,22 @@ parse_options(["-h" | _Rest], _Acc) ->
     usage();
 parse_options(["--help" | _Rest], _Acc) ->
     usage();
-parse_options(["--host" | Rest], Acc) ->
+parse_options(["--query-url" | Rest], Acc) ->
     case Rest of
     [] ->
-        io:format(standard_error, "Missing argument for option --host~n", []),
+        io:format(standard_error, "Missing argument for option --query-url~n", []),
         halt(1);
-    [Host | Rest2] ->
-        parse_options(Rest2, [{host, Host} | Acc])
+    [Url | Rest2] ->
+        parse_options(Rest2, [{query_url, Url} | Acc])
     end;
-parse_options(["--port" = Opt | Rest], Acc) ->
-    {Port, Rest2} = parse_int_param(Opt, Rest),
-    parse_options(Rest2, [{port, Port} | Acc]);
+parse_options(["--query-body" | Rest], Acc) ->
+    case Rest of
+    [] ->
+        io:format(standard_error, "Missing argument for option --query-body~n", []),
+        halt(1);
+    [Body | Rest2] ->
+        parse_options(Rest2, [{query_body, Body} | Acc])
+    end;
 parse_options(["--workers" = Opt | Rest], Acc) ->
     {Workers, Rest2} = parse_int_param(Opt, Rest),
     parse_options(Rest2, [{workers, Workers} | Acc]);
